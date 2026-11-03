@@ -47,6 +47,7 @@ use Tests\Fixtures\Agents\ToolUsingAgent;
 use Tests\Fixtures\ConversationStores\InMemoryConversationStore;
 use Tests\Fixtures\FakeConversationStore;
 use Tests\Fixtures\Tools\FixedNumberGenerator;
+use Tests\Fixtures\Tools\SideEffectRecorder;
 
 test('a synchronous prompt threads one invocation id through the prompt and its events', function (): void {
     Event::fake();
@@ -591,6 +592,97 @@ test('a recoverable failover does not report the run as failed', function (): vo
     Event::assertDispatched(StepFailed::class, fn (StepFailed $event): bool => $event->invocationId === $response->invocationId);
     Event::assertDispatched(AgentFailedOver::class);
     Event::assertDispatched(AgentPrompted::class);
+    Event::assertNotDispatched(AgentFailed::class);
+});
+
+test('a prompt that already ran a tool does not fail over and run it again', function (): void {
+    Event::fake();
+
+    config([
+        'ai.providers.primary' => ['driver' => 'groq', 'key' => 'test-key'],
+        'ai.providers.backup' => ['driver' => 'groq', 'key' => 'test-key'],
+    ]);
+
+    SideEffectRecorder::$invocations = 0;
+
+    Http::preventStrayRequests();
+
+    Http::fakeSequence()
+        ->pushResponse(fakeGroqToolCallResponse('SideEffectRecorder'))
+        ->push(status: 429)
+        ->pushResponse(fakeGroqToolCallResponse('SideEffectRecorder'))
+        ->pushResponse(fakeGroqResponse('Recorded.'));
+
+    $agent = new AnonymousAgent('Record it.', [], [new SideEffectRecorder]);
+
+    // The backup would start the run over and repeat the side effect, so the primary's failure ends the run...
+    expect(fn () => $agent->prompt('Go', provider: ['primary', 'backup']))
+        ->toThrow(RateLimitedException::class);
+
+    expect(SideEffectRecorder::$invocations)->toBe(1);
+
+    Http::assertSentCount(2);
+    Event::assertNotDispatched(AgentFailedOver::class);
+    Event::assertDispatchedTimes(AgentFailed::class, 1);
+});
+
+test('a prompt whose sub-agent ran a tool does not fail over and run it again', function (): void {
+    Event::fake();
+
+    config([
+        'ai.default' => 'primary',
+        'ai.providers.primary' => ['driver' => 'groq', 'key' => 'test-key'],
+        'ai.providers.backup' => ['driver' => 'groq', 'key' => 'test-key'],
+    ]);
+
+    SideEffectRecorder::$invocations = 0;
+
+    Http::preventStrayRequests();
+
+    Http::fakeSequence()
+        ->pushResponse(fakeGroqToolCallResponse('AnonymousAgent', ['task' => 'Record it.']))
+        ->pushResponse(fakeGroqToolCallResponse('SideEffectRecorder'))
+        ->pushResponse(fakeGroqResponse('Recorded.'))
+        ->push(status: 429)
+        ->pushResponse(fakeGroqToolCallResponse('AnonymousAgent', ['task' => 'Record it.']))
+        ->pushResponse(fakeGroqToolCallResponse('SideEffectRecorder'))
+        ->pushResponse(fakeGroqResponse('Recorded.'))
+        ->pushResponse(fakeGroqResponse('Done.'));
+
+    $child = new AnonymousAgent('Record what you are asked to.', [], [new SideEffectRecorder]);
+
+    expect(fn () => (new AnonymousAgent('Delegate.', [], [$child]))->prompt('Go', provider: ['primary', 'backup']))
+        ->toThrow(RateLimitedException::class);
+
+    expect(SideEffectRecorder::$invocations)->toBe(1);
+
+    Http::assertSentCount(4);
+    Event::assertNotDispatched(AgentFailedOver::class);
+});
+
+test('a prompt that fails before running a tool still fails over', function (): void {
+    Event::fake();
+
+    config([
+        'ai.providers.primary' => ['driver' => 'groq', 'key' => 'test-key'],
+        'ai.providers.backup' => ['driver' => 'groq', 'key' => 'test-key'],
+    ]);
+
+    SideEffectRecorder::$invocations = 0;
+
+    Http::preventStrayRequests();
+
+    Http::fakeSequence()
+        ->push(status: 429)
+        ->pushResponse(fakeGroqToolCallResponse('SideEffectRecorder'))
+        ->pushResponse(fakeGroqResponse('Recorded.'));
+
+    $response = (new AnonymousAgent('Record it.', [], [new SideEffectRecorder]))->prompt('Go', provider: ['primary', 'backup']);
+
+    expect($response->text)->toBe('Recorded.')
+        ->and(SideEffectRecorder::$invocations)->toBe(1);
+
+    Event::assertDispatched(AgentFailedOver::class);
     Event::assertNotDispatched(AgentFailed::class);
 });
 

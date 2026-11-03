@@ -7,6 +7,7 @@ use Illuminate\Support\Facades\Event;
 use Illuminate\Support\Facades\Http;
 use Laravel\Ai\Enums\MessageStatus;
 use Laravel\Ai\Events\ToolFailed;
+use Laravel\Ai\Exceptions\RateLimitedException;
 use Laravel\Ai\Messages\AssistantMessage;
 use Laravel\Ai\Messages\ToolResultMessage;
 use Laravel\Ai\Storage\DatabaseConversationStore;
@@ -132,6 +133,30 @@ test('an attempt that fails over to another provider leaves no failed turn behin
     (new RememberingAssistantAgent)->forUser((object) ['id' => 1])->prompt('Go', provider: ['primary', 'backup']);
 
     expect(DB::table('agent_conversation_messages')->where('role', 'assistant')->pluck('status')->all())->toBe(['completed']);
+});
+
+test('an attempt that ran a tool before its provider failed keeps its turn rather than failing over', function (): void {
+    config([
+        'ai.providers.primary' => ['driver' => 'groq', 'key' => 'test-key'],
+        'ai.providers.backup' => ['driver' => 'groq', 'key' => 'test-key'],
+    ]);
+
+    Http::fakeSequence()
+        ->pushResponse(fakeGroqToolCallResponse(id: 'call_1'))
+        ->pushStatus(429)
+        ->pushResponse(fakeGroqToolCallResponse(id: 'call_2'))
+        ->pushResponse(fakeGroqResponse('Done.'));
+
+    expect(fn () => (new RememberingToolUsingAgent)->forUser((object) ['id' => 1])->prompt('Go', provider: ['primary', 'backup']))
+        ->toThrow(RateLimitedException::class);
+
+    Http::assertSentCount(2);
+
+    $row = failedAssistantRow();
+
+    expect($row->status)->toBe(MessageStatus::Failed->value)
+        ->and($row->steps)->json()->toHaveCount(1)
+        ->{'0'}->tool_calls->toHaveCount(1)->each->toMatchArray(['id' => 'call_1', 'result' => '72019']);
 });
 
 test('a stream that dies mid-flight keeps the steps it completed', function (): void {

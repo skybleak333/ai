@@ -105,12 +105,14 @@ trait Promptable
 
         [$parentInvocationId, $parentToolInvocationId] = ParentInvocation::current();
 
+        $attempt = null;
+
         $run = function (TextProvider $provider, string $model, bool $isFinalAttempt = true) use (
             $text, $attachments, $timeout, $invocationId, $approvalDecisions,
-            $parentInvocationId, $parentToolInvocationId, $messages, $tools
+            $parentInvocationId, $parentToolInvocationId, $messages, $tools, &$attempt
         ): AgentResponse {
             return $provider->prompt(
-                new AgentPrompt(
+                $attempt = new AgentPrompt(
                     $this, $text, $attachments, $provider, $model, $this->getTimeout($timeout),
                     invocationId: $invocationId,
                     approvalDecisions: $approvalDecisions,
@@ -129,7 +131,9 @@ trait Promptable
             return $run($provider, $model);
         }
 
-        return $this->withModelFailover($run, $providers, $invocationId);
+        return $this->withModelFailover($run, $providers, $invocationId, function (FailoverableException $e) use (&$attempt): bool {
+            return $attempt?->willRetry($e) ?? true;
+        });
     }
 
     /**
@@ -412,7 +416,7 @@ trait Promptable
      *
      * @param  array<string, string|null>  $providers
      */
-    private function withModelFailover(Closure $callback, array $providers, string $invocationId): mixed
+    private function withModelFailover(Closure $callback, array $providers, string $invocationId, Closure $willRetry): mixed
     {
         $lastException = null;
 
@@ -420,6 +424,11 @@ trait Promptable
             try {
                 return $callback($provider, $model, $isFinalAttempt);
             } catch (FailoverableException $e) {
+                // The next provider starts the run over, which must not happen once the attempt has run a tool...
+                if (! $isFinalAttempt && ! $willRetry($e)) {
+                    throw $e;
+                }
+
                 $lastException = $isFinalAttempt
                     ? $e
                     : $this->recordAgentFailover($invocationId, $provider, $model, $e);

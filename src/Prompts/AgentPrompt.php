@@ -46,6 +46,8 @@ class AgentPrompt extends Prompt
 
     protected ?RunContext $runContext = null;
 
+    protected bool $invokedTools = false;
+
     /**
      * @param  bool  $isFinalAttempt  Whether the caller has run out of providers to retry this prompt against.
      */
@@ -192,6 +194,9 @@ class AgentPrompt extends Prompt
      */
     public function setRunContext(?RunContext $context): void
     {
+        // Detaching a context must not forget that its run started tools, since that decides whether the prompt may be retried...
+        $this->invokedTools = $this->hasInvokedTools();
+
         $this->runContext = $context;
     }
 
@@ -206,12 +211,25 @@ class AgentPrompt extends Prompt
     }
 
     /**
+     * Determine whether the run dispatched for this prompt has started any tool.
+     *
+     * @internal
+     */
+    public function hasInvokedTools(): bool
+    {
+        return $this->invokedTools || ($this->runContext?->hasInvokedTools() ?? false);
+    }
+
+    /**
      * Determine whether the caller will retry this prompt against another provider.
      *
      * @internal
      */
     public function willRetry(Throwable $exception): bool
     {
-        return $exception instanceof FailoverableException && ! $this->isFinalAttempt;
+        // Another provider starts the run over, so a tool this attempt already ran would run again...
+        return $exception instanceof FailoverableException
+            && ! $this->isFinalAttempt
+            && ! $this->hasInvokedTools();
     }
 }

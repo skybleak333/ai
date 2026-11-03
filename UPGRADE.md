@@ -22,6 +22,14 @@ try {
 
 Code that catches `FailoverableException` or `AiException` is not affected.
 
+### Prompts That Ran A Tool No Longer Fail Over
+
+**Likelihood Of Impact: Low**
+
+This change affects agents prompted with several providers. A `FailoverableException` thrown after the run has invoked a tool is no longer retried against the next provider, since that provider would start the run over and invoke the same tools again. The exception is thrown instead, `AgentFailed` is dispatched, and a remembered conversation stores the completed steps as a failed turn. Streamed runs and approval resumes already behaved this way.
+
+A failure before the run invokes any tool still fails over to the next provider.
+
 ## Upgrading To 1.2 From 1.0
 
 ### Classification Signatures Accept Attachments

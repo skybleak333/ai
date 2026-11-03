@@ -25,6 +25,8 @@ class RunContext
     /** @var array<int, Step> */
     protected array $steps = [];
 
+    protected bool $invokedTools = false;
+
     public function __construct(
         public readonly string $invocationId,
         public readonly Agent $agent,
@@ -51,6 +53,14 @@ class RunContext
         if ($step !== null) {
             $this->steps[$step]->toolResults[] = $result;
         }
+    }
+
+    /**
+     * Determine whether the run has invoked any tool.
+     */
+    public function hasInvokedTools(): bool
+    {
+        return $this->invokedTools;
     }
 
     /**
@@ -118,6 +128,8 @@ class RunContext
      */
     public function invokingTool(Tool $tool, array $arguments, string $toolInvocationId): void
     {
+        $this->invokedTools = true;
+
         $this->events->dispatch(new InvokingTool(
             $this->invocationId, $toolInvocationId, $this->agent, $tool, $arguments,
         ));
